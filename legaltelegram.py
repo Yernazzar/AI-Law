@@ -39,7 +39,7 @@ if not OPENAI_API_KEY:
     warnings.warn("OPENAI_API_KEY not found in .env file")
 
 # Telegram Token
-TELEGRAM_BOT_TOKEN = "8065137762:AAGJ8a-yDczf8L2b54nzR--nwM-0iKELEPc"
+TELEGRAM_BOT_TOKEN = "Private_TOKEN"
 
 # Folders setup
 DATA_FOLDER = os.getenv("DATA_FOLDER", "legal_data")
