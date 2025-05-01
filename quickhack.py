@@ -355,7 +355,7 @@ def clear_chat(session_id="default"):
 
 
 # Gradio Interface
-with gr.Blocks(theme=gr.themes.Soft(), title="LegalAidBot - Юридический Ассистент") as demo:
+with gr.Blocks(theme=gr.themes.Soft(), title="ThemisBot - Юридический Ассистент") as demo:
     gr.Markdown(
         """
         # ⚖️ ThemisBot – Ваш Юридический Ассистент  

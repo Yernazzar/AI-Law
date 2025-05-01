@@ -39,7 +39,7 @@ if not OPENAI_API_KEY:
     warnings.warn("OPENAI_API_KEY not found in .env file")
 
 # Telegram Token
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_KEY")
+TELEGRAM_BOT_TOKEN = "8065137762:AAGJ8a-yDczf8L2b54nzR--nwM-0iKELEPc"
 
 # Folders setup
 DATA_FOLDER = os.getenv("DATA_FOLDER", "legal_data")
@@ -111,6 +111,14 @@ class DocumentManager:
     def get_active_documents(self):
         metadata = self.load_metadata()
         return [doc for doc in metadata.get("documents", []) if doc.get("status") == "active"]
+
+    def get_document_path(self, file_name):
+        """Find the full path of a document by its filename"""
+        for root, _, files in os.walk(self.data_folder):
+            for file in files:
+                if file == file_name:
+                    return os.path.join(root, file)
+        return None
 
 
 # Document processing functions
@@ -288,12 +296,13 @@ def load_or_rebuild_vectorstore(data_folder, indexes_folder, embeddings_model):
 # Prompt template
 def get_legal_prompt_template():
     return (
-        "Вы — ассистент по юридическим консультациям для жителей, называетесь LegalAidBot. "
+        "Вы — ассистент по юридическим консультациям для жителей, называетесь ThemisBot. "
         "Используйте предоставленный контекст для точного и краткого ответа на вопрос. "
         "Отвечайте на языке запроса. "
         "Внимательно анализируйте вопрос и контекст перед ответом. "
         "Давайте четкие, структурированные ответы, используйте маркированные или нумерованные списки, где уместно. "
         "Будьте дружелюбны и выступайте в роли полезного гида. "
+        "Думайте и отвечайте как юрист, будьте уверенны в своих ответах"
         "История чата:\n{chat_history}\n\n"
         "Контекст:\n{context}\n\n"
         "Вопрос: {question}\n\n"
@@ -428,7 +437,7 @@ def handle_start(message):
     user_id = str(message.from_user.id)
     bot.send_message(
         message.chat.id,
-        "👋 Здравствуйте! Я LegalAidBot - ваш юридический ассистент.\n\n"
+        "👋 Здравствуйте! Я ThemisBot - ваш юридический ассистент.\n\n"
         "Задавайте мне юридические вопросы, и я постараюсь на них ответить.\n\n"
         "Команды:\n"
         "/help - Показать справку\n"
@@ -500,22 +509,60 @@ def handle_message(message):
         # Стандартная обработка вопроса через RAG
         answer, source_docs = assistant.get_answer(user_query, user_id)
 
-        # Форматируем источники
-        sources = [doc.metadata.get("file_name") for doc in source_docs if doc.metadata.get("file_name")]
-        sources = list(set(sources))  # Удаляем дубликаты
-
-        # Создаем сообщение с ответом
+        # Сначала отправляем ответ
         response_message = answer
-        if sources:
-            response_message += f"\n\n📚 *Источники:* {', '.join(sources)}"
 
-        # Разбиваем длинные сообщения при необходимости
+        # Отправляем ответ, разбивая на части при необходимости
         if len(response_message) > 4000:
             chunks = [response_message[i:i + 4000] for i in range(0, len(response_message), 4000)]
             for chunk in chunks:
                 bot.send_message(message.chat.id, chunk, parse_mode='Markdown')
         else:
             bot.send_message(message.chat.id, response_message, parse_mode='Markdown')
+
+        # Собираем уникальные источники документов
+        source_files = {}
+        for doc in source_docs:
+            if "file_name" in doc.metadata and "file_path" in doc.metadata:
+                file_name = doc.metadata["file_name"]
+                file_path = doc.metadata["file_path"]
+                source_files[file_name] = file_path
+
+        # Если есть источники, отправляем их как отдельные файлы
+        if source_files:
+            bot.send_message(
+                message.chat.id,
+                "📚 *Использованные документы:*",
+                parse_mode='Markdown'
+            )
+
+            # Отправляем каждый файл отдельно
+            for file_name, file_path in source_files.items():
+                try:
+                    if os.path.exists(file_path):
+                        with open(file_path, 'rb') as file:
+                            bot.send_document(
+                                message.chat.id,
+                                file,
+                                caption=f"Документ: {file_name}"
+                            )
+                    else:
+                        # Если путь неверный, пытаемся найти файл по имени
+                        actual_path = doc_manager.get_document_path(file_name)
+                        if actual_path and os.path.exists(actual_path):
+                            with open(actual_path, 'rb') as file:
+                                bot.send_document(
+                                    message.chat.id,
+                                    file,
+                                    caption=f"Документ: {file_name}"
+                                )
+                except Exception as e:
+                    logger.error(f"Error sending document {file_name}: {e}")
+                    bot.send_message(
+                        message.chat.id,
+                        f"Не удалось отправить документ: {file_name}"
+                    )
+
 
 if __name__ == "__main__":
     logger.info("Starting Themis Telegram bot...")
