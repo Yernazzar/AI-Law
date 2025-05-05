@@ -24,7 +24,7 @@ import telebot
 import logging
 from simulation import SimulationManager, SimulationState
 import templates_generation
-from typing import List, Optional, Dict, Tuple
+from typing import Dict, Tuple
 from transformers import AutoTokenizer, AutoModel
 from telebot import types
 from langchain_core.retrievers import BaseRetriever
@@ -35,14 +35,7 @@ import tax_calculator
 from decimal import Decimal
 from telebot.handler_backends import State, StatesGroup
 from telebot.storage import StateMemoryStorage
-import telebot
-from telebot import types
-import logging
-from decimal import Decimal
-import tax_calculator
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from io import BytesIO
+import deadlines
 
 # Configure logging
 logging.basicConfig(
@@ -504,9 +497,319 @@ except Exception as e:
 
 # Initialize Telegram bot
 logger.info("Starting Telegram bot...")
-
 state_storage = StateMemoryStorage()
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, state_storage=state_storage)
+
+# Определение состояний для добавления дедлайна
+class DeadlineStates(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_date = State()
+    waiting_for_category = State()
+    waiting_for_confirmation = State()
+
+# Обработчик команды /add_deadline
+@bot.message_handler(commands=['add_deadline'])
+def handle_add_deadline(message):
+    """Обработчик команды /add_deadline для добавления пользовательского дедлайна."""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    bot.send_message(
+        chat_id,
+        "Введите название дедлайна (или /cancel для отмены):",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    bot.set_state(user_id, DeadlineStates.waiting_for_title, chat_id)
+    logger.info(f"User {user_id} started adding a deadline, set state to waiting_for_title")
+    current_state = bot.get_state(user_id, chat_id)
+    logger.info(f"Current state after set_state: {current_state}")
+
+# Обработчик команды /cancel
+@bot.message_handler(commands=['cancel'], state="*")
+def handle_cancel(message):
+    """Обработчик команды /cancel для отмены процесса добавления дедлайна."""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    bot.send_message(
+        chat_id,
+        "❌ Процесс добавления дедлайна отменен.",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+    bot.delete_state(user_id, chat_id)
+    logger.info(f"User {user_id} cancelled deadline addition")
+
+# Обработка ввода названия дедлайна
+@bot.message_handler(state=DeadlineStates.waiting_for_title)
+def handle_deadline_title(message):
+    """Обработка ввода названия дедлайна."""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    title = message.text.strip()
+
+    # Валидация названия
+    if not title or len(title) > 100:
+        bot.send_message(
+            chat_id,
+            "Название не может быть пустым или длиннее 100 символов. Попробуйте снова (или /cancel):"
+        )
+        logger.warning(f"User {user_id} entered invalid title: {title}")
+        return
+
+    bot.add_data(user_id, chat_id, title=title)
+    bot.send_message(
+        chat_id,
+        "Введите дату дедлайна в формате ДД.ММ.ГГГГ (например, 31.12.2025) или /cancel:"
+    )
+    bot.set_state(user_id, DeadlineStates.waiting_for_date, chat_id)
+    logger.info(f"User {user_id} entered deadline title: {title}, set state to waiting_for_date")
+    current_state = bot.get_state(user_id, chat_id)
+    logger.info(f"Current state after set_state to waiting_for_date: {current_state}")
+
+# Обработка ввода даты дедлайна
+@bot.message_handler(state=DeadlineStates.waiting_for_date)
+def handle_deadline_date(message):
+    """Обработка ввода даты дедлайна."""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    date_text = message.text.strip()
+
+    # Валидация формата даты
+    try:
+        deadline_date = datetime.strptime(date_text, "%d.%m.%Y")
+        if deadline_date < datetime.now():
+            bot.send_message(
+                chat_id,
+                "Дата не может быть в прошлом. Введите дату в формате ДД.ММ.ГГГГ или /cancel:"
+            )
+            logging.warning(f"User {user_id} entered past date: {date_text}")
+            return
+    except ValueError:
+        bot.send_message(
+            chat_id,
+            "Неверный формат даты. Введите дату в формате ДД.ММ.ГГГГ (например, 31.12.2025) или /cancel:"
+        )
+        logging.warning(f"User {user_id} entered invalid date format: {date_text}")
+        return
+
+    bot.add_data(user_id, chat_id, date=date_text)
+    # Создаем клавиатуру с категориями
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    categories = ["Налоги", "Суд", "Бизнес", "Личное", "Пользовательский"]
+    for category in categories:
+        keyboard.add(types.InlineKeyboardButton(category, callback_data=f"category:{category}"))
+    keyboard.add(types.InlineKeyboardButton("Отмена", callback_data="category:cancel"))
+
+    bot.send_message(
+        chat_id,
+        "Выберите категорию дедлайна:",
+        reply_markup=keyboard
+    )
+    bot.set_state(user_id, DeadlineStates.waiting_for_category, chat_id)
+    logging.info(f"User {user_id} entered deadline date: {date_text}, set state to waiting_for_category")
+
+# Обработка выбора категории
+@bot.callback_query_handler(func=lambda call: call.data.startswith("category:"))
+def handle_deadline_category(call):
+    """Обработка выбора категории дедлайна."""
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    category_data = call.data.split(":")[1]
+
+    if category_data == "cancel":
+        bot.send_message(
+            chat_id,
+            "❌ Процесс добавления дедлайна отменен.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        bot.delete_state(user_id, chat_id)
+        logging.info(f"User {user_id} cancelled deadline addition at category step")
+        return
+
+    category = category_data
+    bot.add_data(user_id, chat_id, category=category)
+
+    # Получаем сохраненные данные
+    with bot.retrieve_data(user_id, chat_id) as data:
+        title = data.get('title')
+        date = data.get('date')
+
+    # Показываем данные для подтверждения
+    confirmation_message = (
+        f"Пожалуйста, подтвердите данные дедлайна:\n\n"
+        f"📌 *Название:* {title}\n"
+        f"📅 *Дата:* {date}\n"
+        f"🏷️ *Категория:* {category}\n\n"
+        f"Все верно?"
+    )
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(
+        types.InlineKeyboardButton("Сохранить", callback_data="confirm:save"),
+        types.InlineKeyboardButton("Отмена", callback_data="confirm:cancel")
+    )
+
+    bot.send_message(
+        chat_id,
+        confirmation_message,
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    bot.set_state(user_id, DeadlineStates.waiting_for_confirmation, chat_id)
+    logging.info(f"User {user_id} selected category: {category}, set state to waiting_for_confirmation")
+
+# Обработка подтверждения
+@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm:"))
+def handle_confirmation(call):
+    """Обработка подтверждения данных дедлайна."""
+    bot.answer_callback_query(call.id)
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    action = call.data.split(":")[1]
+
+    if action == "cancel":
+        bot.send_message(
+            chat_id,
+            "❌ Процесс добавления дедлайна отменен.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        bot.delete_state(user_id, chat_id)
+        logging.info(f"User {user_id} cancelled deadline addition at confirmation step")
+        return
+
+    # Получаем данные
+    with bot.retrieve_data(user_id, chat_id) as data:
+        title = data.get('title')
+        date = data.get('date')
+        category = data.get('category')
+
+    # Сохраняем дедлайн
+    try:
+        success = deadlines.add_user_deadline(user_id, title, date, category)
+        if success:
+            bot.send_message(
+                chat_id,
+                f"✅ Дедлайн успешно добавлен!\n\n"
+                f"*{title}*\n"
+                f"Дата: {date}\n"
+                f"Категория: {category}",
+                parse_mode="Markdown",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+            logging.info(f"User {user_id} added deadline: {title}, {date}, {category}")
+        else:
+            bot.send_message(
+                chat_id,
+                "❌ Ошибка при сохранении дедлайна. Возможно, дедлайн уже существует или произошла ошибка сервера.",
+                reply_markup=types.ReplyKeyboardRemove()
+            )
+            logging.error(f"User {user_id} failed to add deadline: {title}")
+    except Exception as e:
+        bot.send_message(
+            chat_id,
+            f"❌ Произошла ошибка: {str(e)}",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        logging.error(f"User {user_id} error saving deadline: {str(e)}")
+
+    # Сбрасываем состояние
+    bot.delete_state(user_id, chat_id)
+
+@bot.message_handler(commands=['my_deadlines'])
+def handle_my_deadlines(message):
+    """Обработчик команды /my_deadlines для просмотра пользовательских дедлайнов."""
+    user_id = message.from_user.id
+
+    # Получаем сообщение с дедлайнами
+    deadlines_message = deadlines.generate_user_deadlines_message(user_id)
+
+    # Создаем клавиатуру для управления
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        types.InlineKeyboardButton("Добавить дедлайн", callback_data="user_deadline:add"),
+        types.InlineKeyboardButton("Удалить дедлайн", callback_data="user_deadline:delete")
+    )
+
+    bot.send_message(
+        message.chat.id,
+        deadlines_message,
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("user_deadline:"))
+def handle_user_deadline_callback(call):
+    """Обработчик кнопок управления пользовательскими дедлайнами."""
+    action = call.data.split(":")[1]
+
+    if action == "add":
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            call.message.chat.id,
+            "Для добавления нового дедлайна используйте команду /add_deadline"
+        )
+    elif action == "delete":
+        user_deadlines = deadlines.get_user_deadlines(call.from_user.id)
+
+        if not user_deadlines:
+            bot.answer_callback_query(call.id, text="У вас нет сохраненных дедлайнов")
+            return
+
+        # Создаем клавиатуру для выбора дедлайна для удаления
+        keyboard = types.InlineKeyboardMarkup(row_width=1)
+
+        for i, deadline in enumerate(user_deadlines):
+            keyboard.add(
+                types.InlineKeyboardButton(
+                    f"{i + 1}. {deadline['title']} ({deadline['date']})",
+                    callback_data=f"delete_deadline:{i}"
+                )
+            )
+
+        keyboard.add(
+            types.InlineKeyboardButton("Отмена", callback_data="delete_deadline:cancel")
+        )
+
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            call.message.chat.id,
+            "Выберите дедлайн для удаления:",
+            reply_markup=keyboard
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("delete_deadline:"))
+def handle_delete_deadline(call):
+    """Обработчик удаления выбранного дедлайна."""
+    bot.answer_callback_query(call.id)
+
+    action = call.data.split(":")[1]
+
+    if action == "cancel":
+        bot.send_message(
+            call.message.chat.id,
+            "❌ Удаление отменено"
+        )
+        return
+
+    try:
+        deadline_index = int(action)
+        success = deadlines.delete_user_deadline(call.from_user.id, deadline_index)
+
+        if success:
+            bot.send_message(
+                call.message.chat.id,
+                "✅ Дедлайн успешно удален!"
+            )
+        else:
+            bot.send_message(
+                call.message.chat.id,
+                "❌ Не удалось удалить дедлайн. Возможно, он был уже удален."
+            )
+    except ValueError:
+        bot.send_message(
+            call.message.chat.id,
+            "❌ Произошла ошибка при обработке запроса."
+        )
 
 # Command handlers
 @bot.message_handler(commands=['simulation'])
@@ -522,6 +825,160 @@ def handle_simulation(message):
             bot.send_message(message.chat.id, chunk, parse_mode='Markdown')
     else:
         bot.send_message(message.chat.id, response, parse_mode='Markdown')
+
+
+# Add the deadlines command handler to your bot initialization section
+@bot.message_handler(commands=['deadlines'])
+def handle_deadlines(message):
+    """Handle the /deadlines command to show legal deadlines."""
+    # Create buttons for different views
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+
+    # Add buttons for all deadlines and by category
+    keyboard.add(
+        types.InlineKeyboardButton("Все сроки", callback_data="deadlines:all"),
+        types.InlineKeyboardButton("По категориям", callback_data="deadlines:categories")
+    )
+
+    # Add PDF report button
+    keyboard.add(
+        types.InlineKeyboardButton("Скачать PDF отчет", callback_data="deadlines:pdf")
+    )
+
+    # Add button for user deadlines
+    keyboard.add(
+        types.InlineKeyboardButton("Мои дедлайны", callback_data="deadlines:user")
+    )
+
+    bot.reply_to(
+        message,
+        "📅 *Важные юридические сроки и дедлайны*\n\n"
+        "Выберите вариант просмотра:",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
+    logging.info(f"User {message.from_user.id} requested deadlines")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("deadlines:"))
+def handle_deadlines_callback(call):
+    """Handle callbacks from deadlines menu."""
+    bot.answer_callback_query(call.id)
+    parts = call.data.split(":")
+    action = parts[1] if len(parts) > 1 else "all"
+    category = parts[2] if len(parts) > 2 else None
+
+    if action == "all":
+        # Show all deadlines
+        message = deadlines.generate_deadlines_message()
+        bot.send_message(call.message.chat.id, message, parse_mode='Markdown')
+        logging.info(f"User {call.from_user.id} viewed all deadlines")
+
+    elif action == "categories":
+        # Show categories selection
+        categories = deadlines.get_categories()
+        keyboard = types.InlineKeyboardMarkup(row_width=2)
+
+        for category in categories:
+            keyboard.add(
+                types.InlineKeyboardButton(
+                    category,
+                    callback_data=f"deadlines:category:{category}"
+                )
+            )
+
+        # Add back button
+        keyboard.add(
+            types.InlineKeyboardButton("« Назад", callback_data="deadlines:back")
+        )
+
+        bot.send_message(
+            call.message.chat.id,
+            "Выберите категорию сроков:",
+            reply_markup=keyboard
+        )
+        logging.info(f"User {call.from_user.id} viewed deadline categories")
+
+    elif action == "category" and category:
+        # Show deadlines for specific category
+        message = deadlines.generate_category_deadlines_message(category)
+
+        # Add back button
+        keyboard = types.InlineKeyboardMarkup()
+        keyboard.add(
+            types.InlineKeyboardButton("« Назад к категориям", callback_data="deadlines:categories")
+        )
+
+        bot.send_message(
+            call.message.chat.id,
+            message,
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+        logging.info(f"User {call.from_user.id} viewed deadlines for category: {category}")
+
+    elif action == "pdf":
+        # Generate and send PDF report
+        try:
+            pdf_buffer = deadlines.generate_pdf_report()
+            current_date = datetime.now().strftime("%Y-%m-%d")
+            filename = f"Legal_Deadlines_{current_date}.pdf"
+
+            bot.send_document(
+                call.message.chat.id,
+                pdf_buffer,
+                caption="📊 Отчет по юридическим срокам и дедлайнам",
+                visible_file_name=filename
+            )
+            logging.info(f"User {call.from_user.id} downloaded deadlines PDF")
+        except Exception as e:
+            bot.send_message(
+                call.message.chat.id,
+                f"Ошибка при создании PDF: {str(e)}"
+            )
+            logging.error(f"Error generating PDF for user {call.from_user.id}: {str(e)}")
+
+    elif action == "back":
+        # Go back to main deadlines menu
+        keyboard = types.InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            types.InlineKeyboardButton("Все сроки", callback_data="deadlines:all"),
+            types.InlineKeyboardButton("По категориям", callback_data="deadlines:categories")
+        )
+        keyboard.add(
+            types.InlineKeyboardButton("Скачать PDF отчет", callback_data="deadlines:pdf")
+        )
+
+        bot.edit_message_text(
+            "📅 *Важные юридические сроки и дедлайны*\n\n"
+            "Выберите вариант просмотра:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    elif action == "user":
+        # Show user deadlines
+        message = deadlines.generate_user_deadlines_message(call.from_user.id)
+
+        # Add back button and management buttons
+        keyboard = types.InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            types.InlineKeyboardButton("Добавить дедлайн", callback_data="user_deadline:add"),
+            types.InlineKeyboardButton("Удалить дедлайн", callback_data="user_deadline:delete")
+        )
+        keyboard.add(
+            types.InlineKeyboardButton("« Назад", callback_data="deadlines:back")
+        )
+
+        bot.send_message(
+            call.message.chat.id,
+            message,
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+        logging.info(f"User {call.from_user.id} viewed user deadlines")
+
 
 @bot.message_handler(commands=['stop_simulation'])
 def handle_stop_simulation(message):
@@ -736,10 +1193,13 @@ def handle_start(message):
         "/simulation [тема] - Начать юридическую симуляцию\n"
         "/stop_simulation - Остановить текущую симуляцию\n"
         "/taxcalc [сумма]- Калькулятор налогов\n"
+        "/deadlines - Важные юридические сроки и дедлайны\n"
+        "/add_deadline - Добавить свой дедлайн\n"
+        "/my_deadlines - Просмотреть свои дедлайны\n"
         "/toggle_reranking - Включить/выключить улучшенный поиск документов"
     )
-    #assistant.clear_history(user_id)
 
+# And update the help message in handle_help function:
 @bot.message_handler(commands=['help'])
 def handle_help(message):
     bot.send_message(
@@ -755,6 +1215,9 @@ def handle_help(message):
         "- /simulation [тема] - Начать юридическую симуляцию\n"
         "- /stop_simulation - Остановить текущую симуляцию\n"
         "- /taxcalc [сумма]- Калькулятор налогов\n"
+        "- /deadlines - Важные юридические сроки и дедлайны\n"
+        "- /add_deadline - Добавить свой дедлайн\n"
+        "- /my_deadlines - Просмотреть свои дедлайны\n"
         "- /toggle_reranking - Включить/выключить улучшенный поиск документов\n",
         parse_mode='Markdown'
     )
@@ -810,11 +1273,21 @@ def handle_toggle_reranking(message):
     assistant.qa = user_qa_chain
     bot.send_message(message.chat.id, status_message)
 
+# Общий обработчик сообщений (должен быть последним!)
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     user_id = str(message.from_user.id)
     user_query = message.text
-    bot.send_chat_action(message.chat.id, 'typing')
+    chat_id = message.chat.id
+
+    # Проверяем состояние перед обработкой
+    current_state = bot.get_state(user_id, chat_id)
+    logger.info(f"User {user_id} sent message '{user_query}', current state: {current_state}")
+    if current_state:
+        logger.warning(f"State detected, skipping general handler for user {user_id}")
+        return  # Прерываем обработку, если состояние активно
+
+    bot.send_chat_action(chat_id, 'typing')
 
     if simulation_manager.is_in_simulation(user_id):
         sim_state = simulation_manager.get_simulation_state(user_id)
@@ -827,18 +1300,18 @@ def handle_message(message):
         if len(response) > 4000:
             chunks = [response[i:i + 4000] for i in range(0, len(response), 4000)]
             for chunk in chunks:
-                bot.send_message(message.chat.id, chunk, parse_mode='Markdown')
+                bot.send_message(chat_id, chunk, parse_mode='Markdown')
         else:
-            bot.send_message(message.chat.id, response, parse_mode='Markdown')
+            bot.send_message(chat_id, response, parse_mode='Markdown')
     else:
         answer, source_docs = assistant.get_answer(user_query, user_id)
         response_message = answer
         if len(response_message) > 4000:
             chunks = [response_message[i:i + 4000] for i in range(0, len(response_message), 4000)]
             for chunk in chunks:
-                bot.send_message(message.chat.id, chunk, parse_mode='Markdown')
+                bot.send_message(chat_id, chunk, parse_mode='Markdown')
         else:
-            bot.send_message(message.chat.id, response_message, parse_mode='Markdown')
+            bot.send_message(chat_id, response_message, parse_mode='Markdown')
         source_files = {}
         for doc in source_docs:
             if "file_name" in doc.metadata and "file_path" in doc.metadata:
@@ -847,7 +1320,7 @@ def handle_message(message):
                 source_files[file_name] = file_path
         if source_files:
             bot.send_message(
-                message.chat.id,
+                chat_id,
                 "📚 *Использованные документы:*",
                 parse_mode='Markdown'
             )
@@ -856,7 +1329,7 @@ def handle_message(message):
                     if os.path.exists(file_path):
                         with open(file_path, 'rb') as file:
                             bot.send_document(
-                                message.chat.id,
+                                chat_id,
                                 file,
                                 caption=f"Документ: {file_name}"
                             )
@@ -865,14 +1338,14 @@ def handle_message(message):
                         if actual_path and os.path.exists(actual_path):
                             with open(actual_path, 'rb') as file:
                                 bot.send_document(
-                                    message.chat.id,
+                                    chat_id,
                                     file,
                                     caption=f"Документ: {file_name}"
                                 )
                 except Exception as e:
                     logger.error(f"Error sending document {file_name}: {e}")
                     bot.send_message(
-                        message.chat.id,
+                        chat_id,
                         f"Не удалось отправить документ: {file_name}"
                     )
 
